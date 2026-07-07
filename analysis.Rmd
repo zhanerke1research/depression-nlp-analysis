@@ -1,0 +1,305 @@
+---
+title: "Topic Modeling and Sentiment Analysis of Reddit Posts About Depression"
+author: "Zhanerke Shaktybek"
+date: "2026-07-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Load Packages
+
+```{r load-packages}
+library(tidyverse)
+library(tidytext)
+library(topicmodels)
+library(SnowballC)
+library(wordcloud)
+library(textdata)
+library(janitor)
+```
+
+# 2. Load Dataset
+
+```{r load-data}
+if (file.exists("depression.csv")) {
+  depression <- read_csv("depression.csv")
+} else if (file.exists("data/depression.csv")) {
+  depression <- read_csv("data/depression.csv")
+} else {
+  stop("File 'depression.csv' was not found. Put it in the project folder or in the data/ folder.")
+}
+```
+
+# 3. Explore Dataset
+
+```{r explore-data}
+glimpse(depression)
+names(depression)
+
+```
+
+# 4. Data Preprocessing
+
+```{r tokenize}
+tidy_depression <- depression %>%
+  select(id, body) %>%
+  filter(!is.na(body)) %>%
+  unnest_tokens(word, body)
+```
+
+```{r remove-stopwords}
+data("stop_words")
+
+tidy_depression <- tidy_depression %>%
+  anti_join(stop_words, by = "word")
+```
+
+```{r clean-words}
+tidy_depression <- tidy_depression %>%
+  filter(
+    !word %in% c(
+      "deleted", "removed", "im", "i'm", "dont", "don’t",
+      "ive", "i’ve", "yeah", "yep", "huh", "fam", "bye",
+      "site", "pero"
+    ),
+    str_detect(word, "^[a-z]+$"),
+    str_length(word) > 2,
+    str_length(word) < 20
+  )
+```
+
+```{r keep-common-words}
+valid_words <- tidy_depression %>%
+  count(word, sort = TRUE) %>%
+  filter(n >= 10)
+
+tidy_depression_clean <- tidy_depression %>%
+  semi_join(valid_words, by = "word")
+```
+
+# 5. Frequency Analysis
+
+```{r word-frequency-table}
+word_frequency <- tidy_depression_clean %>%
+  count(word, sort = TRUE)
+
+head(word_frequency, 20)
+```
+
+```{r word-frequency-plot}
+word_frequency %>%
+  slice_max(order_by = n, n = 15) %>%
+  ggplot(aes(x = reorder(word, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 15 Most Frequent Words in Reddit Depression Posts",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+# 6. TF-IDF Analysis
+
+```{r tfidf-table}
+tfidf <- tidy_depression_clean %>%
+  count(id, word) %>%
+  bind_tf_idf(word, id, n)
+
+top_tfidf <- tfidf %>%
+  arrange(desc(tf_idf))
+
+head(top_tfidf, 20)
+```
+
+```{r tfidf-plot}
+top_tfidf %>%
+  slice_max(order_by = tf_idf, n = 15) %>%
+  ggplot(aes(x = reorder(word, tf_idf), y = tf_idf)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 15 Words by TF-IDF",
+    x = "Word",
+    y = "TF-IDF"
+  ) +
+  theme_minimal()
+```
+
+# 7. Bigram Analysis
+
+```{r bigram-tokenization}
+bigrams <- depression %>%
+  select(id, body) %>%
+  filter(!is.na(body)) %>%
+  unnest_tokens(
+    bigram,
+    body,
+    token = "ngrams",
+    n = 2
+  )
+
+head(bigrams)
+```
+
+```{r bigram-separation}
+bigrams_sep <- bigrams %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ", remove = FALSE)
+```
+
+```{r bigram-filtering}
+bigrams_filtered <- bigrams_sep %>%
+  filter(
+    !is.na(word1),
+    !is.na(word2),
+    !word1 %in% stop_words$word,
+    !word2 %in% stop_words$word,
+    str_detect(word1, "^[a-z]+$"),
+    str_detect(word2, "^[a-z]+$"),
+    str_length(word1) > 2,
+    str_length(word2) > 2,
+    !word1 %in% c("deleted", "removed", "dont", "ive"),
+    !word2 %in% c("deleted", "removed", "dont", "ive")
+  )
+
+head(bigrams_filtered)
+```
+
+```{r bigram-counts}
+bigram_counts <- bigrams_filtered %>%
+  count(word1, word2, sort = TRUE)
+
+head(bigram_counts, 20)
+```
+
+```{r bigram-plot}
+bigram_counts %>%
+  unite(bigram, word1, word2, sep = " ") %>%
+  slice_max(order_by = n, n = 15) %>%
+  ggplot(aes(x = reorder(bigram, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 15 Most Frequent Bigrams",
+    x = "Bigram",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+# 8. Topic Modeling with LDA
+
+```{r create-dtm}
+dtm <- tidy_depression_clean %>%
+  count(id, word) %>%
+  cast_dtm(id, word, n)
+```
+
+```{r lda-model}
+lda_model <- LDA(dtm, k = 5, control = list(seed = 1234))
+```
+
+```{r lda-top-terms}
+lda_topics <- tidy(lda_model, matrix = "beta")
+
+top_terms <- lda_topics %>%
+  group_by(topic) %>%
+  slice_max(order_by = beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, desc(beta))
+
+top_terms
+```
+
+```{r lda-plot}
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(x = term, y = beta)) +
+  geom_col() +
+  facet_wrap(~ topic, scales = "free_y") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(
+    title = "Top Terms in Each LDA Topic",
+    x = "",
+    y = "Beta"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+# 9. Sentiment Analysis
+
+```{r sentiment-dictionary}
+bing_sentiment <- get_sentiments("bing")
+
+head(bing_sentiment)
+```
+
+```{r sentiment-join}
+sentiment <- tidy_depression_clean %>%
+  inner_join(bing_sentiment, by = "word")
+
+head(sentiment)
+```
+
+```{r sentiment-count}
+sentiment_count <- sentiment %>%
+  count(sentiment)
+
+sentiment_count
+```
+
+```{r sentiment-plot}
+ggplot(sentiment_count, aes(x = sentiment, y = n)) +
+  geom_col(show.legend = FALSE) +
+  labs(
+    title = "Sentiment Distribution",
+    x = "Sentiment",
+    y = "Word Count"
+  ) +
+  theme_minimal()
+```
+
+```{r top-sentiment-table}
+top_sentiment <- sentiment %>%
+  count(sentiment, word, sort = TRUE) %>%
+  group_by(sentiment) %>%
+  slice_max(order_by = n, n = 10) %>%
+  ungroup()
+
+top_sentiment
+```
+
+```{r top-sentiment-plot}
+top_sentiment %>%
+  mutate(word = reorder_within(word, n, sentiment)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ sentiment, scales = "free_y") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(
+    title = "Most Frequent Positive and Negative Words",
+    x = "",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+# 10. Word Cloud
+
+```{r word-cloud}
+set.seed(1234)
+
+word_frequency %>%
+  with(wordcloud(
+    words = word,
+    freq = n,
+    max.words = 100,
+    random.order = FALSE
+  ))
+```
